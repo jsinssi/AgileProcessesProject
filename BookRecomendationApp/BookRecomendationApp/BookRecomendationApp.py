@@ -3,11 +3,18 @@ import pandas as pd
 import hashlib
 import os
 import base64
+from pymongo import MongoClient
+import requests
+import json
+import asyncio
+import httpx
 
 # ---------------- CONFIG ----------------
 ITERATIONS = 100_000
 SALT_SIZE = 16
-DATA_PATH = r'BookRecomendationApp\books.csv'  # make sure the dataset is in the same folder
+MONGO_URI = "mongodb+srv://liam:admin@agilemtu.knrhvja.mongodb.net/?appName=AgileMTU"
+DB_NAME = "book_rating_app"
+COLLECTION_NAME = "bookModel"
 # ----------------------------------------
 
 # ---------------- PASSWORD UTILS ----------------
@@ -35,10 +42,22 @@ users = {
 
 # ---------------- LOAD BOOK DATA ----------------
 try:
-    books = pd.read_csv(DATA_PATH)
+    client = MongoClient(MONGO_URI)
+    db = client[DB_NAME]
+    collection = db[COLLECTION_NAME]
+    books_cursor = collection.find({})
+    books_list = list(books_cursor)
+    books = pd.DataFrame(books_list)
+    client.close()
+    # Extract year from publication_date for display consistency
+    if 'publication_date' in books.columns:
+        books['release_year'] = pd.to_datetime(books['publication_date'], errors='coerce').dt.year
+    else:
+        books['release_year'] = 'N/A'
+
 except Exception as e:
     books = pd.DataFrame()
-    print(f"Error loading dataset: {e}")
+    print(f"Error loading data from MongoDB: {e}")
 # ------------------------------------------------
 
 
@@ -102,32 +121,122 @@ def dashboard():
     ui.label("📖 Book Recommendation Dashboard").classes("text-2xl mb-4 font-bold")
     
     if books.empty:
-        ui.label("Dataset not loaded. Please check 'books.csv'.")
+        ui.label("Dataset not loaded. Please check MongoDB connection and data.")
         return
 
-    ui.label(f"Loaded {len(books)} books").classes("text-gray-600")
+    ui.label(f"Loaded {len(books)} books").classes("text-gray-600 mb-4")
 
-    search_box = ui.input("Search by title or author").classes("w-80")
-    result_area = ui.column().classes("mt-4")
+    async def get_open_library_genres(isbn: str, client: httpx.AsyncClient) -> str:
+        """Asynchronously fetches book genres from Open Library API with retry logic."""
+        url = f"https://openlibrary.org/api/books?bibkeys=ISBN:{isbn}&format=json&jscmd=data"
+        retries = 3
+        delay = 2  # seconds
+        for attempt in range(retries):
+            try:
+                response = await client.get(url, timeout=10.0)
+                response.raise_for_status()
+                data = response.json()
+                book_data = data.get(f"ISBN:{isbn}", {})
+                subjects = [subject["name"] for subject in book_data.get("subjects", [])]
+                return ", ".join(subjects[:5]) if subjects else "N/A"
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code in [502, 503, 504] and attempt < retries - 1:
+                    print(f"Service unavailable for Open Library ISBN {isbn}, retrying in {delay}s...")
+                    await asyncio.sleep(delay)
+                    delay *= 2
+                else:
+                    print(f"Error fetching genres for ISBN {isbn} after {retries} retries: {e}")
+                    return "N/A"
+            except (httpx.RequestError, json.JSONDecodeError) as e:
+                print(f"Error fetching genres for ISBN {isbn}: {e}")
+                return "N/A"
+        return "N/A"
 
-    def search_books():
-        query = (search_box.value or "").lower()
-        # safe access to columns to avoid KeyError if missing
-        filtered = books[books.apply(lambda r: query in str(r.get('title', '')).lower() or query in str(r.get('author', '')).lower(), axis=1)]
+    async def get_google_books_description(isbn: str, client: httpx.AsyncClient) -> str:
+        """Asynchronously fetches a book description from the Google Books API."""
+        url = f"https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}"
+        retries = 3
+        delay = 2  # seconds
+        for attempt in range(retries):
+            try:
+                response = await client.get(url, timeout=10.0)
+                response.raise_for_status()
+                data = response.json()
+                if "items" in data and data["items"]:
+                    volume_info = data["items"][0].get("volumeInfo", {})
+                    return volume_info.get("description", "No description available.")
+                return "No description found on Google Books."
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code in [502, 503, 504] and attempt < retries - 1:
+                    print(f"Service unavailable for Google Books ISBN {isbn}, retrying in {delay}s...")
+                    await asyncio.sleep(delay)
+                    delay *= 2
+                else:
+                    print(f"Error fetching description from Google Books for ISBN {isbn} after {retries} retries: {e}")
+                    return "Could not retrieve description."
+            except (httpx.RequestError, json.JSONDecodeError) as e:
+                print(f"Error fetching description from Google Books for ISBN {isbn}: {e}")
+                return "Could not retrieve description."
+        return "Could not retrieve description."
+
+    async def update_results(query: str):
+        """Clears and repopulates the result area based on the search query."""
         result_area.clear()
-        if filtered.empty:
-            with result_area:
-                ui.label("No matching books found.").classes("text-red-500")
+        if not query:
             return
-        for _, row in filtered.head(10).iterrows():
-            with result_area:
-                with ui.card().classes("p-3 mb-2 w-96"):
-                    ui.label(f"📘 {row.get('title', 'Untitled')} ({row.get('release_year', 'N/A')})").classes("font-semibold")
-                    ui.label(f"Author: {row.get('author', 'Unknown')}")
-                    ui.label(f"Genre: {row.get('genre', 'Unknown')}")
-                    ui.label(f"Rating: {row.get('average_rating', 'N/A')} ⭐")
 
-    ui.button("Search", on_click=search_books).classes("mt-2 bg-green-600 text-white")
+        filtered = books[books.apply(lambda r: query in str(r.get('title', '')).lower() or query in str(r.get('authors', '')).lower(), axis=1)].head(10)
+        
+        with result_area:
+            if filtered.empty:
+                ui.label("No matching books found.").classes("text-red-500")
+                return
+
+            async with httpx.AsyncClient() as client:
+                tasks = []
+                for _, row in filtered.iterrows():
+                    isbn = row.get('isbn')
+                    if isbn:
+                        tasks.append(get_open_library_genres(isbn, client))
+                        tasks.append(get_google_books_description(isbn, client))
+                
+                results = await asyncio.gather(*tasks)
+
+            details_map = {}
+            task_index = 0
+            for _, row in filtered.iterrows():
+                isbn = row.get('isbn')
+                if isbn:
+                    genres = results[task_index]
+                    description = results[task_index + 1]
+                    if genres and genres != "N/A":
+                        details_map[isbn] = (description, genres)
+                    task_index += 2
+
+            for _, row in filtered.iterrows():
+                isbn = row.get('isbn')
+                if isbn and isbn in details_map:
+                    with ui.card().classes("p-3 mb-2 w-full max-w-2xl"):
+                        with ui.row().classes("w-full items-center no-wrap"):
+                            with ui.column().classes("flex-grow"):
+                                ui.label(f"📘 {row.get('title', 'Untitled')} ({row.get('release_year', 'N/A')})").classes("font-semibold")
+                                ui.label(f"Author: {row.get('authors', 'Unknown')}")
+                                ui.label(f"Rating: {row.get('average_rating', 'N/A')} ⭐")
+                                
+                                description, genres = details_map[isbn]
+                                ui.label(f"Genres: {genres}").classes("text-sm text-gray-500")
+                                with ui.expansion("Description", icon="article").classes("w-full"):
+                                    ui.label(description).classes("text-sm")
+                            
+                            if isbn:
+                                cover_url = f"https://covers.openlibrary.org/b/isbn/{isbn}-M.jpg"
+                                ui.image(cover_url).classes("w-20 h-auto ml-4").props('fit=contain')
+
+    search_box = ui.input(
+        "Search by title or author", 
+        on_change=lambda e: update_results(e.value.lower())
+    ).props('debounce=500') # Add this line
+    result_area = ui.column().classes("mt-4")
 # ------------------------------------------------
 
 
