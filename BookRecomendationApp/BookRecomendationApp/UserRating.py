@@ -4,7 +4,6 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from pymongo import MongoClient
 
-
 app = FastAPI(title="User Rated Books API")
 
 # ---------------- Output model ----------------
@@ -15,9 +14,10 @@ class UserRatings(BaseModel):
 
 
 # ---------------- Connect to Mongo database ----------------
-MONGO_URI = "mongodb+srv://<db_username>:<db_password>@agilemtu.knrhvja.mongodb.net/?appName=AgileMTUers" # <--- Will need to update once the correct DB has been created
-db = client["UserDatabase"]             # <-- Will need to update once the correct DB has been created
-use_book_collection = db["book_ratings"]   
+MONGO_URI = "mongodb+srv://<db_username>:<db_password>@agilemtu.knrhvja.mongodb.net/?appName=AgileMTU"
+client = MongoClient(MONGO_URI)
+db = client["UserDatabase"]
+user_book_collection = db["User_book_ratings"]
 
 
 # ---------------- Get User Book Ratings ----------------
@@ -26,13 +26,12 @@ def get_user_ratings(username_X: Optional[str] - Header(None)):
     if not username_X:
         raise  HTTPException(status_code=401, detail="Not authenticated")
     
-    user_book_ratings = list(use_book_collection.find(
+    user_book_ratings = list(user_book_collection.find(
         {
-            "username": username_X.lower(),
-            "user_books" : {"$gte": 1, "$lte": 5}
+            "username": username_x.lower(),
+            "user_rating": {"$gte": 1, "$lte": 5}
         }
     ))
-
     if user_book_ratings.empty:
         raise  HTTPException(status_code=404, detail="You have no ratings yet!")
     
