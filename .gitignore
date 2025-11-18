@@ -5,3 +5,12 @@ __pycache__/
 *.py[cod]
 node_modules/
 .github/
+
+# Visual Studio Project Files to Ignore
+.vs/
+*.sln.ide*
+*.suo
+*.user
+
+# Other common Python/environment files
+venv/
