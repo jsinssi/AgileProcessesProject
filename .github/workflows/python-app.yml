@@ -1,0 +1,57 @@
+# Githunb workflow: Install depenedncies, lint andd test python code 
+name: Python application
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: #Matrix allows testing to happening on multiple versions of python
+        python-version: ["pypy3.10", "3.9", "3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    #Set up the version of python using the matrix 
+    - name: Set up Python ${{ matrix.python-version}}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version}}
+        
+    # Will print out the current version of Python being used 
+    - name: Display Python version
+      run: python -c "import sys; print(sys.version)"
+
+    #Install the dependencies, linters and test tools
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip setuptools wheel
+        pip install -r requirements.txt  
+        pip install flake8 pytest pytest-cov
+
+    # Lint the code with flake8
+    - name: Lint with flake8
+      run: |
+        # will fail is there are syntax errors or undefined names
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        # Will treat all errors as warnings
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+    # Run the test with pytest and generate a coverage report 
+    - name: Test with pytest
+      run: |
+        pytest tests.py \ 
+        --doctest-modules \
+        --junitxml=junit/test-results.xml \
+        --cov=com \
+        --cov-report=xml \
+        --cov-report=html
