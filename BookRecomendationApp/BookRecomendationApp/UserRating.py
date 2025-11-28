@@ -1,8 +1,9 @@
 import pandas as pd
 from typing import List
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 from pymongo import MongoClient
+from typing import Optional
 
 app = FastAPI(title="User Rated Books API")
 
@@ -22,13 +23,13 @@ user_book_collection = db["User_book_ratings"]
 
 # ---------------- Get User Book Ratings ----------------
 @app.get("/ratedBooks}", response_model = List[UserRatings])
-def get_user_ratings(username_X: Optional[str] - Header(None)):
+def get_user_ratings(username_X: Optional[str] = Header(None)):
     if not username_X:
         raise  HTTPException(status_code=401, detail="Not authenticated")
     
     user_book_ratings = list(user_book_collection.find(
         {
-            "username": username_x.lower(),
+            "username": username_X.lower(),
             "user_rating": {"$gte": 1, "$lte": 5}
         }
     ))

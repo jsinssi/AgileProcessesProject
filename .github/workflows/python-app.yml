@@ -19,7 +19,8 @@ jobs:
         python-version: ["pypy3.10", "3.9", "3.10", "3.11", "3.12", "3.13"]
 
     steps:
-    - uses: actions/checkout@v4
+    - name: Repository checkout
+     uses: actions/checkout@v4
 
     #Set up the version of python using the matrix 
     - name: Set up Python ${{ matrix.python-version}}
@@ -40,8 +41,9 @@ jobs:
     # Lint the code with flake8
     - name: Lint with flake8
       run: |
-        # will fail is there are syntax errors or undefined names
+        # will fail if there are syntax errors or undefined names
         flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        
         # Will treat all errors as warnings
         flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
