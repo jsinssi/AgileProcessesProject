@@ -28,7 +28,7 @@ def get_user_ratings(username_X: Optional[str] - Header(None)):
     
     user_book_ratings = list(user_book_collection.find(
         {
-            "username": username_x.lower(),
+            "username": username_X.lower(),
             "user_rating": {"$gte": 1, "$lte": 5}
         }
     ))
