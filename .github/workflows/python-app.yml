@@ -49,4 +49,4 @@ jobs:
     # Run the test with pytest and generate a coverage report 
     - name: Test with pytest
       run: |
-        pytest
+        pytest test.py
