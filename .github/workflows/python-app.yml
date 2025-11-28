@@ -49,9 +49,4 @@ jobs:
     # Run the test with pytest and generate a coverage report 
     - name: Test with pytest
       run: |
-        pytest tests.py \ 
-        --doctest-modules \
-        --junitxml=junit/test-results.xml \
-        --cov=com \
-        --cov-report=xml \
-        --cov-report=html
+        pytest
