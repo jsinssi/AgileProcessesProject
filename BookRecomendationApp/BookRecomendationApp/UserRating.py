@@ -1,8 +1,9 @@
 import pandas as pd
 from typing import List
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 from pymongo import MongoClient
+from typing import Optional
 
 app = FastAPI(title="User Rated Books API")
 
