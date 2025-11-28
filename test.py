@@ -3,7 +3,7 @@ from unittest.mock import patch, MagicMock
 import pandas as pd
 
 # Import functions from app file
-from BookRecomendationApp import(
+from BookRecomendationApp.BookRecomendationApp.BookRecomendationApp import(
     hash_password,
     verify_password,
     safe_navigate,
