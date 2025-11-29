@@ -36,7 +36,12 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip setuptools wheel 
+        if [[ "${{ matrix.python-version}}" == "pypy3.10" ]]; then
+        echo "Skipping NiceGUI on PyPy (incompatible)"
+        pip install flake8 pytest pytest-cov pandas
+        else
         pip install flake8 pytest pytest-cov pandas nicegui
+        fi
 
     # Lint the code with flake8
     - name: Lint with flake8
