@@ -1,4 +1,4 @@
-from nicegui import ui, app
+from nicegui import ui, app, client
 import pandas as pd
 import hashlib
 import os
@@ -117,7 +117,7 @@ def login_page():
         safe_navigate("/dashboard")
         return
     with ui.column().classes('w-full h-screen items-center justify-center bg-gray-100'):
-        with ui.card().classes('w-96 p-8 shadow-xl rounded-lg'):
+        with ui.card().classes('w-96 p-8 shadow-xl rounded-lg border-t-4 border-blue-600'):
             ui.label("📚 Book Recommendation Login").classes("text-3xl mb-6 font-bold text-center text-gray-700")
             
             with ui.input("Username").classes('w-full mb-4') as username:
@@ -137,7 +137,7 @@ def login_page():
 @ui.page("/register")
 def register_page():
     with ui.column().classes('w-full h-screen items-center justify-center bg-gray-100'):
-        with ui.card().classes('w-96 p-8 shadow-xl rounded-lg'):
+        with ui.card().classes('w-96 p-8 shadow-xl rounded-lg border-t-4 border-green-600'):
             ui.label("📝 New User Registration").classes("text-3xl mb-6 font-bold text-center text-gray-700")
             
             with ui.input("Choose a username").classes('w-full mb-4') as username:
@@ -183,6 +183,83 @@ def format_ratings_count(num):
         return f"{num / 1_000:.1f}K"
     return str(int(num))
 
+async def get_open_library_description(isbn: str, client: httpx.AsyncClient) -> str:
+    """Fetches a book description from the Open Library API."""
+    url = f"https://openlibrary.org/api/books?bibkeys=ISBN:{isbn}&format=json&jscmd=data"
+    try:
+        response = await client.get(url, timeout=5.0)
+        response.raise_for_status()
+        data = response.json()
+        book_data = data.get(f"ISBN:{isbn}", {})
+        description = book_data.get("description")
+        if isinstance(description, dict):
+            return description.get("value", "No description available.")
+        return description or "No description available."
+    except (httpx.RequestError, json.JSONDecodeError) as e:
+        print(f"Error fetching description from Open Library for ISBN {isbn}: {e}")
+        return "No description available."
+
+async def get_book_data(isbn: str, client: httpx.AsyncClient) -> str:
+    """Fetches book description, trying Google Books first, then Open Library as a fallback."""
+    # --- Google Books API (Primary) ---
+    url_google = f"https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}"
+    description = "No description available."
+    retries = 3
+    delay = 0.5  # seconds
+
+    for attempt in range(retries):
+        try:
+            response = await client.get(url_google, timeout=5.0)
+            response.raise_for_status()
+            data = response.json()
+            if "items" in data and data["items"]:
+                volume_info = data["items"][0].get("volumeInfo", {})
+                description = volume_info.get("description", "No description available.")
+            break  # Success, exit the loop
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in [502, 503, 504] and attempt < retries - 1:
+                print(f"Service unavailable for Google Books ISBN {isbn}, retrying in {delay}s...")
+                await asyncio.sleep(delay)
+                delay *= 2  # Exponential backoff
+            else:
+                print(f"Error fetching from Google Books for ISBN {isbn} after {retries} retries: {e}")
+                break  # Failed after retries, exit loop
+        except (httpx.RequestError, json.JSONDecodeError) as e:
+            print(f"Error fetching from Google Books for ISBN {isbn}: {e}")
+            break # Non-retryable error, exit loop
+
+    # --- Open Library API (Fallback) ---
+    if description in ["No description available.", "No description found on Google Books."]:
+        description = await get_open_library_description(isbn, client)
+
+    return description
+
+async def get_open_library_genres(isbn: str, client: httpx.AsyncClient) -> str:
+    """Asynchronously fetches book genres from Open Library API with retry logic."""
+    url = f"https://openlibrary.org/api/books?bibkeys=ISBN:{isbn}&format=json&jscmd=data"
+    retries = 3
+    delay = .5  # seconds
+    for attempt in range(retries):
+        try:
+            response = await client.get(url, timeout=10.0)
+            response.raise_for_status()
+            data = response.json()
+            book_data = data.get(f"ISBN:{isbn}", {})
+            subjects = [subject["name"] for subject in book_data.get("subjects", [])]
+            return ", ".join(subjects[:5]) if subjects else "N/A"
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in [502, 503, 504] and attempt < retries - 1:
+                print(f"Service unavailable for Open Library ISBN {isbn}, retrying in {delay}s...")
+                await asyncio.sleep(delay)
+                delay *= .5
+            else:
+                print(f"Error fetching genres for ISBN {isbn} after {retries} retries: {e}")
+                return "N/A"
+        except (httpx.RequestError, json.JSONDecodeError) as e:
+            print(f"Error fetching genres for ISBN {isbn}: {e}")
+            return "N/A"
+    return "N/A"
+
 @ui.page("/dashboard")
 def dashboard():
     if not app.storage.user.get("authenticated"):
@@ -192,7 +269,7 @@ def dashboard():
     username = app.storage.user.get("username")
 
     with ui.header(elevated=True).classes('items-center justify-between bg-blue-600 text-white'):
-        ui.label('📖 Book Recommendation Dashboard').classes('text-2xl font-bold')
+        ui.label(f"📖 {username}'s Dashboard").classes('text-2xl font-bold')
         with ui.row().classes('items-center'):
             ui.button('My Analytics', on_click=lambda: safe_navigate('/analytics'), icon='analytics').props('flat color=white')
             ui.button('Logout', on_click=handle_logout, icon='logout').props('flat color=white')
@@ -209,28 +286,52 @@ def dashboard():
             current_user_rating = user_rating_info['rating'] if user_rating_info else 0
             is_wishlisted = username in book_data.get('wishlisted_by', [])
             
-            with ui.card().classes("w-full mb-4 shadow-md hover:shadow-lg transition-shadow"):
+            with ui.card().classes("w-full mb-4 shadow-md hover:shadow-lg transition-shadow bg-white border border-gray-200"):
                 with ui.row().classes("w-full items-start p-4"):
                     # Book Cover
                     isbn = book_data.get('isbn')
-                    cover_url = f"https://covers.openlibrary.org/b/isbn/{isbn}-M.jpg?default=false" if isbn else "https://via.placeholder.com/128x192.png?text=No+Cover"
-                    ui.image(cover_url).classes("w-32 h-48 rounded-sm mr-6 shadow-lg").on('error', lambda e: e.sender.set_source("https://via.placeholder.com/128x192.png?text=No+Cover"))
+                    open_library_cover = f"https://covers.openlibrary.org/b/isbn/{isbn}-M.jpg?default=false"
+                    google_books_cover = f"https://books.google.com/books/content?vid=isbn:{isbn}&printsec=frontcover&img=1&zoom=1&source=gbs-api"
+                    placeholder_cover = "https://via.placeholder.com/128x192.png?text=No+Cover"
+
+                    # Define error handlers
+                    def handle_google_error(e):
+                        e.sender.set_source(placeholder_cover)
+
+                    def handle_open_library_error(e):
+                        # First, set the new source for the image
+                        e.sender.set_source(google_books_cover)
+                        # Then, add the new error handler to the same image element
+                        e.sender.on('error', handle_google_error)
+
+                    # Create the image with the primary error handler
+                    ui.image(open_library_cover) \
+                        .classes("w-32 h-48 rounded-sm mr-6 shadow-lg") \
+                        .on('error', handle_open_library_error)
                     
                     # Book Details Column
                     with ui.column().classes("flex-grow"):
                         ui.label(f"{book_data.get('title', 'Untitled')} ({book_data.get('release_year', 'N/A')})").classes("text-xl font-bold text-gray-800")
-                        ui.label(f"by {book_data.get('authors', 'Unknown')}").classes("text-lg text-gray-600")
+                        ui.label(f"by {book_data.get('authors', 'Unknown')}").classes("text-lg text-gray-600 mb-2")
                         
-                        # Metadata row
-                        with ui.row().classes("text-sm text-gray-500 items-center my-2 gap-x-4"):
-                            ui.label(f"Avg. Rating: {book_data.get('average_rating', 'N/A')} ⭐")
-                            ratings_count = format_ratings_count(book_data.get('ratings_count'))
-                            ui.label(f"{ratings_count} ratings")
-                            ui.label(f"{int(book_data.get('num_pages', 'N/A'))} pages")
-                            ui.label(f"Publisher: {book_data.get('publisher', 'N/A')}")
+                        # Metadata grid
+                        with ui.grid(columns=2).classes("text-sm text-gray-600 gap-x-4 gap-y-1"):
+                            with ui.row().classes('items-center'):
+                                ui.icon('star', size='sm').classes('text-amber-500 mr-1')
+                                ui.label(f"Avg. Rating: {book_data.get('average_rating', 'N/A')}")
+                            with ui.row().classes('items-center'):
+                                ui.icon('group', size='sm').classes('text-gray-500 mr-1')
+                                ratings_count = format_ratings_count(book_data.get('ratings_count'))
+                                ui.label(f"{ratings_count} ratings")
+                            with ui.row().classes('items-center'):
+                                ui.icon('menu_book', size='sm').classes('text-gray-500 mr-1')
+                                ui.label(f"{int(book_data.get('num_pages', 0))} pages")
+                            with ui.row().classes('items-center'):
+                                ui.icon('business', size='sm').classes('text-gray-500 mr-1')
+                                ui.label(f"Publisher: {book_data.get('publisher', 'N/A')}")
 
                         # Genres and Description
-                        ui.label(f"Genres: {book_data.get('genres', 'N/A')}").classes("text-xs italic text-gray-500")
+                        ui.label(f"Genres: {book_data.get('genres', 'N/A')}").classes("text-xs italic text-gray-500 mt-2")
                         ui.markdown(description).classes("mt-2 text-sm text-gray-700 max-h-24 overflow-y-auto bg-gray-50 p-2 rounded")
 
                     # Actions Column
@@ -295,59 +396,6 @@ def dashboard():
                 print(f"Error updating wishlist: {e}")
                 ui.notify("Could not update wishlist. Please try again.", color="negative")
 
-        async def get_open_library_genres(isbn: str, client: httpx.AsyncClient) -> str:
-            """Asynchronously fetches book genres from Open Library API with retry logic."""
-            url = f"https://openlibrary.org/api/books?bibkeys=ISBN:{isbn}&format=json&jscmd=data"
-            retries = 3
-            delay = .5  # seconds
-            for attempt in range(retries):
-                try:
-                    response = await client.get(url, timeout=10.0)
-                    response.raise_for_status()
-                    data = response.json()
-                    book_data = data.get(f"ISBN:{isbn}", {})
-                    subjects = [subject["name"] for subject in book_data.get("subjects", [])]
-                    return ", ".join(subjects[:5]) if subjects else "N/A"
-                except httpx.HTTPStatusError as e:
-                    if e.response.status_code in [502, 503, 504] and attempt < retries - 1:
-                        print(f"Service unavailable for Open Library ISBN {isbn}, retrying in {delay}s...")
-                        await asyncio.sleep(delay)
-                        delay *= .5
-                    else:
-                        print(f"Error fetching genres for ISBN {isbn} after {retries} retries: {e}")
-                        return "N/A"
-                except (httpx.RequestError, json.JSONDecodeError) as e:
-                    print(f"Error fetching genres for ISBN {isbn}: {e}")
-                    return "N/A"
-            return "N/A"
-
-        async def get_google_books_description(isbn: str, client: httpx.AsyncClient) -> str:
-            """Asynchronously fetches a book description from the Google Books API."""
-            url = f"https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}"
-            retries = 3
-            delay = .5  # seconds
-            for attempt in range(retries):
-                try:
-                    response = await client.get(url, timeout=10.0)
-                    response.raise_for_status()
-                    data = response.json()
-                    if "items" in data and data["items"]:
-                        volume_info = data["items"][0].get("volumeInfo", {})
-                        return volume_info.get("description", "No description available.")
-                    return "No description found on Google Books."
-                except httpx.HTTPStatusError as e:
-                    if e.response.status_code in [502, 503, 504] and attempt < retries - 1:
-                        print(f"Service unavailable for Google Books ISBN {isbn}, retrying in {delay}s...")
-                        await asyncio.sleep(delay)
-                        delay *= .5
-                    else:
-                        print(f"Error fetching description from Google Books for ISBN {isbn} after {retries} retries: {e}")
-                        return "Could not retrieve description."
-                except (httpx.RequestError, json.JSONDecodeError) as e:
-                    print(f"Error fetching description from Google Books for ISBN {isbn}: {e}")
-                    return "Could not retrieve description."
-            return "Could not retrieve description."
-
         async def update_results(query: str = "", genres: list = None, initial_load: bool = False):
             """Clears and repopulates the result area based on search, genres, or initial load."""
             result_area.clear()
@@ -392,13 +440,13 @@ def dashboard():
                 fresh_books_map = {}
 
             async with httpx.AsyncClient() as client:
-                tasks = [get_google_books_description(row.get('isbn'), client) for _, row in search_results_df.iterrows()]
+                tasks = [get_book_data(row.get('isbn'), client) for _, row in search_results_df.iterrows()]
                 descriptions = await asyncio.gather(*tasks)
 
             result_area.clear()
             with result_area:
                 if initial_load:
-                    ui.label("Welcome! Here are some of the top-rated books to get you started:").classes("text-2xl font-bold mb-4 text-gray-700")
+                    ui.label(f"Welcome, {username}! Here are some of the top-rated books to get you started:").classes("text-2xl font-bold mb-4 text-gray-700")
 
                 for (idx, row), desc in zip(search_results_df.iterrows(), descriptions):
                     book_id_str = str(row['_id'])
@@ -433,19 +481,7 @@ def dashboard():
                     with result_area:
                         ui.label(f"You have rated {len(rated_books_list)} book(s):").classes("text-xl font-bold mb-4")
                         for book in rated_books_list:
-                            user_rating_info = next((r for r in book.get('user_ratings', []) if r['username'] == username), None)
-                            my_rating = user_rating_info['rating'] if user_rating_info else "N/A"
-
-                            with ui.card().classes("w-full mb-4 shadow-md"):
-                                with ui.row().classes("w-full items-center p-4"):
-                                    isbn = book.get('isbn')
-                                    cover_url = f"https://covers.openlibrary.org/b/isbn/{isbn}-M.jpg?default=false" if isbn else "https://via.placeholder.com/96x144.png?text=No+Cover"
-                                    ui.image(cover_url).classes("w-24 h-36 rounded-sm mr-4").on('error', lambda e: e.sender.set_source(f"https://via.placeholder.com/96x144.png?text=No+Cover"))
-                                    
-                                    with ui.column().classes("flex-grow"):
-                                        ui.label(f"{book.get('title', 'Untitled')}").classes("text-lg font-bold")
-                                        ui.label(f"by {book.get('authors', 'Unknown')}").classes("text-md")
-                                        ui.label(f"Your Rating: {my_rating} ⭐").classes("text-amber-500 font-bold")
+                            create_book_card(book)
 
                 except Exception as e:
                     print(f"Error fetching rated books: {e}")
@@ -476,16 +512,7 @@ def dashboard():
                     with result_area:
                         ui.label(f"You have {len(wishlist)} book(s) in your wishlist:").classes("text-xl font-bold mb-4")
                         for book in wishlist:
-                            with ui.card().classes("w-full mb-4 shadow-md"):
-                                with ui.row().classes("w-full items-center p-4"):
-                                    isbn = book.get('isbn')
-                                    cover_url = f"https://covers.openlibrary.org/b/isbn/{isbn}-M.jpg?default=false" if isbn else "https://via.placeholder.com/96x144.png?text=No+Cover"
-                                    ui.image(cover_url).classes("w-24 h-36 rounded-sm mr-4").on('error', lambda e: e.sender.set_source(f"https://via.placeholder.com/96x144.png?text=No+Cover"))
-                                    
-                                    with ui.column().classes("flex-grow"):
-                                        ui.label(f"{book.get('title', 'Untitled')}").classes("text-lg font-bold")
-                                        ui.label(f"by {book.get('authors', 'Unknown')}").classes("text-md")
-                                        ui.label(f"Avg. Rating: {book.get('average_rating', 'N/A')} ⭐").classes("text-sm my-1")
+                            create_book_card(book)
                 except Exception as e:
                     print(f"Error fetching wishlist: {e}")
                     result_area.clear()
@@ -575,27 +602,56 @@ def dashboard():
                 with result_area:
                     ui.label("Could not generate recommendations. Please try again later.", color="negative")
 
-        with ui.row().classes("w-full items-center mb-6 gap-x-2"):
-            with ui.input(placeholder="Search by title or author...").classes("flex-grow") as search_box:
-                search_box.props('outlined rounded')
-                with search_box.add_slot('append'):
-                    ui.icon('search')
-            
-            genre_options = get_all_genres()
-            with ui.select(options=genre_options, label="Filter by Genre", multiple=True).classes("w-64").props('outlined rounded clearable') as genre_filter:
-                pass
+        # --- Control Panel ---
+        with ui.card().classes("w-full mb-6"):
+            with ui.row().classes("w-full items-center p-4 gap-4"):
+                with ui.input(placeholder="Search by title or author...").classes("flex-grow") as search_box:
+                    search_box.props('outlined rounded')
+                    with search_box.add_slot('append'):
+                        ui.icon('search').on('click', perform_search)
+                
+                genre_options = get_all_genres()
+                with ui.select(options=genre_options, label="Filter by Genre", multiple=True).classes("w-72").props('outlined rounded clearable') as genre_filter:
+                    pass
 
-            search_box.on("keydown.enter", perform_search)
-            genre_filter.on("change", perform_search)
-            ui.button("Search", on_click=perform_search).classes("h-14")
-            ui.button("My Rated Books", on_click=show_my_ratings, icon='star').classes("h-14")
-            ui.button("My Wishlist", on_click=show_my_wishlist, icon='bookmark').classes("h-14")
-            ui.button("AI Recommendations", on_click=get_ai_recommendations, icon='auto_awesome').classes("h-14 bg-purple-600 text-white")
+                search_box.on("keydown.enter", perform_search)
+                genre_filter.on("change", perform_search)
+
+            with ui.row().classes("w-full justify-start p-4 pt-0 gap-2"):
+                ui.button("My Rated Books", on_click=show_my_ratings, icon='star').props('outline')
+                ui.button("My Wishlist", on_click=show_my_wishlist, icon='bookmark').props('outline')
+                ui.button("AI Recommendations", on_click=get_ai_recommendations, icon='auto_awesome').classes("bg-purple-600 text-white")
 
         result_area = ui.column().classes("w-full")
         
         # Initial load of top-rated books
         asyncio.create_task(update_results(initial_load=True))
+
+def create_rating_distribution_chart(chart_data: list):
+    """Creates a styled bar chart for rating distribution using Matplotlib."""
+    fig, ax = plt.subplots()
+    fig.patch.set_alpha(0.0)  # Transparent figure background
+    ax.patch.set_alpha(0.0)   # Transparent axes background
+
+    bars = ax.bar(['1', '2', '3', '4', '5'], chart_data, color='#60A5FA') # A lighter blue
+
+    # Add data labels on top of each bar
+    for bar in bars:
+        yval = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width()/2.0, yval + 0.1, int(yval), ha='center', va='bottom', color='#4B5563')
+
+    ax.set_ylabel('Number of Books', color='#4B5563')
+    ax.set_xlabel('Star Rating', color='#4B5563')
+    
+    # Customize spines and ticks for a cleaner look
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_color('#D1D5DB')
+    ax.spines['bottom'].set_color('#D1D5DB')
+    ax.tick_params(axis='x', colors='#4B5563')
+    ax.tick_params(axis='y', colors='#4B5563')
+    
+    plt.tight_layout()
 
 @ui.page("/analytics")
 def analytics_page():
@@ -613,149 +669,199 @@ def analytics_page():
 
     content = ui.column().classes('w-full max-w-7xl mx-auto p-4')
 
-    def build_analytics_ui():
-        """Fetches data and builds the analytics UI."""
-        content.clear()
-        with content:
-            ui.label("Loading your analytics...").classes("text-center w-full")
-        
+    async def build_analytics_ui():
+        """Fetches data and builds the analytics UI, handling client disconnections."""
+        # This check is crucial. It ensures that we don't try to update a disconnected client.
+        # The 'client' attribute is None if the user has navigated away.
+        if not content.client.id:
+            print("Analytics UI build aborted: Client has disconnected.")
+            return
+            
         try:
-            client = MongoClient(MONGO_URI)
-            db = client[DB_NAME]
+            with content:
+                content.clear()
+                ui.label("Loading your analytics...").classes("text-center w-full")
+            
+            # --- Data Fetching (Optimized) ---
+            client_mongo = MongoClient(MONGO_URI)
+            db = client_mongo[DB_NAME]
             collection = db[COLLECTION_NAME]
             
-            rated_books_cursor = collection.find({"user_ratings.username": username})
-            rated_books_list = list(rated_books_cursor)
+            # Fetch only the books rated by the user
+            rated_books_list = list(collection.find({"user_ratings.username": username}))
+            
+            # Fetch the average rating from all books using an aggregation pipeline for efficiency
+            pipeline = [{"$group": {"_id": None, "avg_rating": {"$avg": "$average_rating"}}}]
+            community_avg_result = list(collection.aggregate(pipeline))
+            community_average = community_avg_result[0]['avg_rating'] if community_avg_result and community_avg_result[0]['avg_rating'] is not None else 0
+            
+            client_mongo.close()
 
-            # New line to load all books data
-            all_books = list(collection.find({}))
-            books = pd.DataFrame(all_books)
+            # Check again after the long operation, before building the main UI
+            if not content.client.id:
+                print("Analytics UI build aborted: Client disconnected after data fetch.")
+                return
 
-            # Add this line to convert the column to a numeric type
-            books['average_rating'] = pd.to_numeric(books['average_rating'], errors='coerce')
-
-            client.close()
-
-            content.clear()
             if not rated_books_list:
                 with content:
+                    content.clear()
                     ui.label("You haven't rated any books yet. Rate some books to see your analytics!").classes("text-center w-full text-xl mt-8")
                 return
 
             # --- Data Processing ---
             user_ratings = []
-            for book in rated_books_list:
-                rating_info = next((r for r in book.get('user_ratings', []) if r['username'] == username), None)
-                if rating_info:
-                    user_ratings.append({
-                        "title": book.get('title', 'Untitled'),
-                        "authors": book.get('authors', 'Unknown'),
-                        "genres": book.get('genres', ''),
-                        "rating": rating_info['rating'],
-                        "average_rating": pd.to_numeric(book.get('average_rating'), errors='coerce')
-                    })
-
-            total_ratings = len(user_ratings)
-            my_average_rating = sum(r['rating'] for r in user_ratings) / total_ratings if total_ratings > 0 else 0
+            genre_tasks = []
+            books_to_process = []
             
-            # --- Rater Type ---
-            community_average = books['average_rating'].mean()
-            rater_type = "Right in the Middle"
-            if my_average_rating > community_average + 0.5:
-                rater_type = "Easy to Please"
-            elif my_average_rating < community_average - 0.5:
-                rater_type = "Critical Rater"
+            async with httpx.AsyncClient() as http_client:
+                for book in rated_books_list:
+                    rating_info = next((r for r in book.get('user_ratings', []) if r['username'] == username), None)
+                    if rating_info:
+                        books_to_process.append((book, rating_info))
+                        # Only create a task if there is an ISBN
+                        if isbn := book.get('isbn'):
+                            genre_tasks.append(get_open_library_genres(isbn, http_client))
+                        else:
+                            # If no ISBN, append a completed future with a default value
+                            genre_tasks.append(asyncio.create_task(asyncio.sleep(0, result="N/A")))
+                
+                genre_results = await asyncio.gather(*genre_tasks)
 
-            # --- Rating Distribution ---
-            rating_counts = Counter(int(r['rating']) for r in user_ratings)
+            # Check one more time before the final render
+            if not content.client.id:
+                print("Analytics UI build aborted: Client disconnected during data processing.")
+                return
+
+            for (book, rating_info), genres in zip(books_to_process, genre_results):
+                user_ratings.append({
+                    "title": book.get('title', 'Untitled'),
+                    "authors": book.get('authors', 'Unknown'),
+                    "genres": genres,
+                    "rating": rating_info.get('rating'),
+                    "average_rating": pd.to_numeric(book.get('average_rating'), errors='coerce')
+                })
+
+            valid_ratings = [r['rating'] for r in user_ratings if r['rating'] is not None]
+            total_ratings = len(valid_ratings)
+            my_average_rating = sum(valid_ratings) / total_ratings if total_ratings > 0 else 0
+            
+            rater_type = "Generous Rater" if my_average_rating > community_average + 0.5 else "Critical Rater" if my_average_rating < community_average - 0.5 else "Right in the Middle"
+
+            rating_counts = Counter(int(r) for r in valid_ratings)
             chart_data = [rating_counts.get(i, 0) for i in range(1, 6)]
 
-            # --- Top/Bottom Books ---
-            top_books = sorted([r for r in user_ratings if r['rating'] == 5], key=lambda x: x['average_rating'], reverse=True)[:5]
-            bottom_books = sorted([r for r in user_ratings if r['rating'] <= 2], key=lambda x: x['average_rating'])[:5]
+            top_books = sorted([r for r in user_ratings if r['rating'] == 5], key=lambda x: x.get('average_rating', 0), reverse=True)[:5]
+            bottom_books = sorted([r for r in user_ratings if r['rating'] is not None and r['rating'] <= 2], key=lambda x: x.get('average_rating', 0))[:5]
 
-            # --- Most Rated Genres/Authors ---
-            all_genres = [genre.strip() for r in user_ratings for genre in r.get('genres', '').split(',') if genre.strip()]
-            top_genres = Counter(all_genres).most_common(3)
+            all_genres = [genre.strip() for r in user_ratings for genre in r.get('genres', '').split(',') if genre.strip() and genre != "N/A"]
+            top_genres = Counter(all_genres).most_common(5)
             
             all_authors = [author.strip() for r in user_ratings for author in r.get('authors', '').split(',') if author.strip()]
-            top_authors = Counter(all_authors).most_common(3)
+            top_authors = Counter(all_authors).most_common(5)
 
             # --- UI Rendering ---
+            # Final check before rendering the entire UI block
+            if not content.client.id:
+                print("Analytics UI build aborted: Client disconnected just before final render.")
+                return
+
             with content:
+                content.clear() # Clear loading message
                 # --- Summary Cards ---
-                with ui.row().classes("w-full justify-around mb-6 gap-4"):
-                    with ui.card().classes("items-center flex-grow p-4"):
-                        ui.label("Total Books Rated").classes("text-sm text-gray-500")
-                        ui.label(f"{total_ratings}").classes("text-4xl font-bold")
-                    with ui.card().classes("items-center flex-grow p-4"):
-                        ui.label("Your Average Rating").classes("text-sm text-gray-500")
-                        ui.label(f"{my_average_rating:.2f} ⭐").classes("text-4xl font-bold text-amber-500")
-                    with ui.card().classes("items-center flex-grow p-4"):
-                        ui.label("You Are A...").classes("text-sm text-gray-500")
-                        ui.label(rater_type).classes("text-4xl font-bold text-blue-600")
+                with ui.grid(columns=3).classes("w-full justify-around mb-6 gap-4"):
+                    with ui.card().classes("items-center p-4"):
+                        with ui.row().classes('items-center no-wrap'):
+                            ui.icon('library_books', size='lg').classes('text-gray-400 mr-4')
+                            with ui.column().classes('gap-0'):
+                                ui.label("Total Books Rated").classes("text-sm text-gray-500")
+                                ui.label(f"{len(user_ratings)}").classes("text-4xl font-bold")
+                    with ui.card().classes("items-center p-4"):
+                        with ui.row().classes('items-center no-wrap'):
+                            ui.icon('star_half', size='lg').classes('text-amber-400 mr-4')
+                            with ui.column().classes('gap-0'):
+                                ui.label("Your Average Rating").classes("text-sm text-gray-500")
+                                ui.label(f"{my_average_rating:.2f}").classes("text-4xl font-bold")
+                    with ui.card().classes("items-center p-4"):
+                        with ui.row().classes('items-center no-wrap'):
+                            ui.icon('psychology', size='lg').classes('text-blue-400 mr-4')
+                            with ui.column().classes('gap-0'):
+                                ui.label("You Are A...").classes("text-sm text-gray-500")
+                                ui.label(rater_type).classes("text-2xl font-bold text-blue-600")
 
-                with ui.row().classes("w-full gap-6"):
-                    # --- Left Column ---
-                    with ui.column().classes("w-1/2"):
+                # --- Main Grid ---
+                with ui.grid(columns=3).classes("w-full gap-6"):
+                    # --- Column 1: Rating Distribution ---
+                    with ui.card().classes("w-full col-span-3 lg:col-span-1"):
+                        ui.label("Rating Distribution").classes("text-xl font-bold p-4")
+                        with ui.pyplot(close=True).classes('w-full h-64'):
+                            create_rating_distribution_chart(chart_data)
+                    
+                    # --- Column 2: Reading Habits ---
+                    with ui.column().classes("w-full col-span-3 lg:col-span-1 gap-6"):
                         with ui.card().classes("w-full"):
-                            ui.label("Rating Distribution").classes("text-xl font-bold p-4")
-                            
-                            with ui.pyplot(close=True).classes('w-full h-64'):
-                                plt.bar(['1', '2', '3', '4', '5'], chart_data, color='#3B82F6')
-                                plt.ylabel('Number of Books')
-                                plt.xlabel('Star Rating')
-                                # Hide the top and right spines for a cleaner look
-                                ax = plt.gca()
-                                ax.spines['top'].set_visible(False)
-                                ax.spines['right'].set_visible(False)
+                            ui.label("Your Top Genres").classes("text-xl font-bold p-4")
+                            if top_genres:
+                                with ui.list().classes("w-full"):
+                                    for genre, count in top_genres:
+                                        with ui.item():
+                                            with ui.item_section().props('side').classes('text-gray-500'):
+                                                ui.icon('theater_comedy')
+                                            ui.item_section(f"{genre}")
+                                            ui.item_section(f"{count}").props("side")
+                            else:
+                                ui.label("No genre data found.").classes("p-4")
                         
-                        with ui.card().classes("w-full mt-6"):
-                            ui.label("Your Reading Habits").classes("text-xl font-bold p-4")
-                            with ui.list().classes("w-full"):
-                                ui.item_label("Most Rated Genres").props("header")
-                                for genre, count in top_genres:
-                                    with ui.item():
-                                        ui.item_section(f"{genre}").classes("font-bold")
-                                        ui.item_section(f"{count} book(s)").props("side")
-                                ui.separator()
-                                ui.item_label("Most Rated Authors").props("header")
-                                for author, count in top_authors:
-                                    with ui.item():
-                                        ui.item_section(f"{author}").classes("font-bold")
-                                        ui.item_section(f"{count} book(s)").props("side")
-
-                    # --- Right Column ---
-                    with ui.column().classes("w-1/2"):
                         with ui.card().classes("w-full"):
-                            ui.label("Your 5-Star Books (Top 5)").classes("text-xl font-bold p-4 text-green-600")
+                            ui.label("Your Top Authors").classes("text-xl font-bold p-4")
+                            if top_authors:
+                                with ui.list().classes("w-full"):
+                                    for author, count in top_authors:
+                                        with ui.item():
+                                            with ui.item_section().props('side').classes('text-gray-500'):
+                                                ui.icon('edit')
+                                            ui.item_section(f"{author}")
+                                            ui.item_section(f"{count}").props("side")
+                            else:
+                                ui.label("No author data found.").classes("p-4")
+
+                    # --- Column 3: Book Lists ---
+                    with ui.column().classes("w-full col-span-3 lg:col-span-1 gap-6"):
+                        with ui.card().classes("w-full"):
+                            ui.label("Your 5-Star Books").classes("text-xl font-bold p-4 text-green-600")
                             if top_books:
                                 with ui.list().classes("w-full"):
                                     for book in top_books:
                                         with ui.item():
-                                            ui.item_section(f"{book['title']} by {book['authors']}")
+                                            with ui.item_section().props('side').classes('text-amber-500'):
+                                                ui.icon('emoji_events')
+                                            ui.item_section(f"{book['title']}")
                             else:
                                 ui.label("No 5-star ratings yet!").classes("p-4")
 
-                        with ui.card().classes("w-full mt-6"):
-                            ui.label("Your Lowest-Rated Books (Bottom 5)").classes("text-xl font-bold p-4 text-red-600")
+                        with ui.card().classes("w-full"):
+                            ui.label("Your Lowest-Rated Books").classes("text-xl font-bold p-4 text-red-600")
                             if bottom_books:
                                 with ui.list().classes("w-full"):
                                     for book in bottom_books:
                                         with ui.item():
-                                            ui.item_section(f"{book['title']} by {book['authors']}")
+                                            with ui.item_section().props('side').classes('text-gray-500'):
+                                                ui.icon('thumb_down')
+                                            ui.item_section(f"{book['title']}")
                                             ui.item_section(f"{book['rating']} ⭐").props("side")
                             else:
                                 ui.label("No low ratings yet!").classes("p-4")
 
         except Exception as e:
             print(f"Error building analytics UI: {e}")
-            content.clear()
-            with content:
-                # Corrected line
-                ui.label("Could not load your analytics. Please try again later.").classes("text-negative")
+            # Check connection again before trying to show an error message
+            if content.client.id:
+                with content:
+                    content.clear()
+                    ui.label("Could not load your analytics. Please try again later.").classes("text-negative")
+            else:
+                print(f"Error building analytics UI for disconnected client: {e}")
 
-    build_analytics_ui()
+    ui.timer(0.1, build_analytics_ui, once=True)
 # ------------------------------------------------
 
 
