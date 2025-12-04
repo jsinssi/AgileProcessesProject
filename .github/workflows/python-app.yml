@@ -12,7 +12,6 @@ permissions:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -21,7 +20,7 @@ jobs:
 
     steps:
     - name: Repository checkout
-     uses: actions/checkout@v4
+      uses: actions/checkout@v4
 
     #Set up the version of python using the matrix 
     - name: Set up Python ${{ matrix.python-version}}
