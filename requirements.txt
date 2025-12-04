@@ -1,0 +1,7 @@
+nicegui
+pandas
+pymongo
+dnspython
+requests
+httpx
+matplotlib
