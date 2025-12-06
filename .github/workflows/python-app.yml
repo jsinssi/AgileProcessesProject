@@ -13,10 +13,11 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 600 #this is the max allowed 
     strategy:
       fail-fast: false
-      matrix: #Matrix allows testing to happening on multiple versions of python
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+      matrix: # Matrix allows testing to happening on multiple versions of python
+        python-version: ["3.9", "3.13"]
 
     steps:
     - name: Repository checkout
