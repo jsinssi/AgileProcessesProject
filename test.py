@@ -27,7 +27,7 @@ def test_hash_and_verify_password():
 # ----------------------------------------
 # LOGIN LOGIC TESTING
 # ----------------------------------------
-@patch("BookRecomendationApp.ui")
+@patch("BookRecomendationApp.BookRecomendationApp.BookRecomendationApp.ui")
 def test_login_success(mock_ui):
     users["Bilbo"] = hash_password("baggins1")
 
@@ -37,7 +37,7 @@ def test_login_success(mock_ui):
     mock_ui.navigate.to.assert_called_with("/dashboard")
 
 
-@patch("BookRecomendationApp.ui")
+@patch("BookRecomendationApp.BookRecomendationApp.BookRecomendationApp.ui")
 def test_login_failure(mock_ui):
     handle_login("unknown", "wrong")
 
@@ -47,7 +47,7 @@ def test_login_failure(mock_ui):
 # ----------------------------------------
 # REGISTRATION TESTING
 # ----------------------------------------
-@patch("BookRecomendationApp.ui")
+@patch("BookRecomendationApp.BookRecomendationApp.BookRecomendationApp.ui")
 def test_registration_success(mock_ui):
     username = "harry_potter"
     if username in users:
@@ -60,7 +60,7 @@ def test_registration_success(mock_ui):
     mock_ui.navigate.to.assert_called_with("/")
 
 
-@patch("BookRecomendationApp.ui")
+@patch("BookRecomendationApp.BookRecomendationApp.BookRecomendationApp.ui")
 def test_registration_existing_user(mock_ui):
     users["existing_user"] = hash_password("111")
 
@@ -69,7 +69,7 @@ def test_registration_existing_user(mock_ui):
     mock_ui.notify.assert_called_with("This Username already exists. Please try again!", color="negative")
 
 
-@patch("BookRecomendationApp.ui")
+@patch("BookRecomendationApp.BookRecomendationApp.BookRecomendationApp.ui")
 def test_registration_empty_fields(mock_ui):
     handle_registration("", "")
     mock_ui.notify.assert_called_with("Username and password cannot be empty. Please make sure all elements are filled in!", color="negative")
@@ -78,7 +78,7 @@ def test_registration_empty_fields(mock_ui):
 # ----------------------------------------
 # TEST safe_navigate() function
 # ----------------------------------------
-@patch("BookRecomendationApp.ui")
+@patch("BookRecomendationApp.BookRecomendationApp.BookRecomendationApp.ui")
 def test_safe_navigate(mock_ui):
     mock_ui.navigate.to = MagicMock()
 
